@@ -1,0 +1,1066 @@
+
+#include <Arduino.h>
+#include <micro_ros_platformio.h>
+
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+// #include <micro_ros_utilities/type_utilities.h>
+// #include <micro_ros_utilities/string_utilities.h>
+#include <std_msgs/msg/float32_multi_array.h>
+
+#include <std_msgs/msg/int32.h> //for integer messages
+#include <std_msgs/msg/string.h>
+#include <std_msgs/msg/int32_multi_array.h>
+// using namespace std;                // allow the C++ standard string library to be called as std::
+#include <string>                   // C++ standard string Library
+
+//my libraries
+#include "freertos/FreeRTOS.h"      // freeRTOS Libraries 
+#include "freertos/task.h"          // freeRTOS Task Header
+#include "esp_system.h"
+#include "soc/rtc_wdt.h"   
+#include <mySD.h>
+#include <SparkFun_u-blox_GNSS_Arduino_Library.h>
+#include <Adafruit_BNO055.h>
+#include <NimBLEDevice.h>           // Bluetooth Library for Arduino: NimBLE-Arduino. Usage Docs --> https://h2zero.github.io/NimBLE-Arduino/
+// #include <RH_RF95.h> //LORA
+
+// Test extra packages
+// #include <control_msgs/msg/joint_controller_state.h>
+// #include <my_custom_message/msg/my_custom_message.h>
+// control_msgs__msg__JointControllerState control_message;
+// my_custom_message__msg__MyCustomMessage custom_msg;
+std_msgs__msg__Float32MultiArray msg2;
+
+// #if !defined(MICRO_ROS_TRANSPORT_ARDUINO_SERIAL)
+// #error This example is only avaliable for Arduino framework with serial transport.
+// #endif
+
+//publisher initialization
+rcl_publisher_t publisher;
+rcl_publisher_t publisher2;
+std_msgs__msg__Int32 msg;
+std_msgs__msg__Float32MultiArray msg_array_float;
+static float infoBuffer[10];
+
+
+//rclc initialization...
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
+rcl_timer_t timer;
+
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
+
+
+// ---------------- ---------------- ---------------- ---------------- ----------------
+// ----------------------------------- FreeRTOS ------------------------------------
+// ---------------- ---------------- ---------------- ---------------- ----------------
+TaskHandle_t Task1;
+TaskHandle_t Task2;
+TaskHandle_t Task3;
+TaskHandle_t Task4;
+
+//Task counters
+int GPScounter = 0;
+int IMUcounter = 0;
+int LORAcounter = 0;
+
+//Mutex and Semaphores
+static SemaphoreHandle_t GPSMutex;
+static SemaphoreHandle_t IMUMutex;
+static SemaphoreHandle_t LORAMutex;
+
+String GPSlist = "emptyGPSlist";
+String IMUlist = "emptyIMUlist";
+String message = "emptyMessage";
+
+// Task Rates
+static const int RATE_GPS = 5000; //500; //2000;  // ms
+static const int RATE_IMU = 100; //100; //1000;  // ms
+static const int RATE_LORA = 3000; //500; //1000;
+
+// ---------------- ---------------- ---------------- ---------------- ----------------
+// ----------------------------------- GPS ------------------------------------
+// ---------------- ---------------- ---------------- ---------------- ----------------
+#define PIN_SDA 4
+#define PIN_SCL 15
+SFE_UBLOX_GNSS myGNSS;  //M8Q GNSS
+
+//GPS vars
+float latitude = 0.0;
+float longitude = 0.0;
+float altitude = 0.0;
+float GPSspeed = 0.0;
+float GPSheading = 0.0;
+
+// ---------------- ---------------- ---------------- ---------------- ----------------
+// ----------------------------------- SDcard ------------------------------------
+// ---------------- ---------------- ---------------- ---------------- ----------------
+//SD Card initialization
+#define SD_MOSI 18
+#define SD_MISO 19
+#define SD_CLK 5
+const int SDchipSelect = 23; //For SDcard CS pin at 32
+File myFile;
+
+#define Select LOW
+#define DeSelect HIGH
+
+#define H_MOSI 12 //13
+#define H_MISO 38 //12
+#define H_CLK 13
+#define H_CS 23
+SPIClass SPI2(HSPI);
+
+// ---------------- ---------------- ---------------- ---------------- ----------------
+// ----------------------------------- IMU ------------------------------------
+// ---------------- ---------------- ---------------- ---------------- ----------------
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);  //Bosch BNO055 IMU
+
+//IMU vars
+float Ax = 0; //acceleration x, y, z
+float Ay = 0;
+float Az = 0;
+float Bx = 0; //magnetometer x, y, z, and ,roll, pitch, yaw
+float By = 0;
+float Bz = 0;
+float Gyrox = 0; // gyro
+float Gyroy = 0;
+float Gyroz = 0;
+float Euler_x = 0; //Euler orientation
+float Euler_y = 0;
+float Euler_z = 0;
+float Quat_x = 0; //Quaternion orientation
+float Quat_y = 0;
+float Quat_z = 0;
+float Quat_w = 0;
+float heading = 0;
+float prev_posx = 0;
+float prev_posy = 0;
+float prev_posz = 0;
+float prev_velx = 0;
+float prev_vely = 0;
+float prev_velz = 0;
+float prev_heading = 0;
+sensors_event_t orientationData, angVelocityData , linearAccelData, magnetometerData, accelerometerData, gravityData;
+
+
+// ---------------- ---------------- ---------------- ---------------- ----------------
+// ------------------------------------ Thermistor ------------------------------------
+// ---------------- ---------------- ---------------- ---------------- ----------------
+#define THERMISTORPIN 13              // which analog pin to connect        
+#define THERMISTORNOMINAL 92500       // resistance at 25 degrees C
+#define TEMPERATURENOMINAL 22.5       // temp. for nominal resistance (almost always 25 C)
+#define NUMSAMPLES 5                  // samples for moving avg filter -- not using rn
+#define BCOEFFICIENT 3950             // The beta coefficient of the thermistor
+#define SERIESRESISTOR 100000         // the value of the fixed resistor in series
+#define ADCRESOLUTION  4095          // The resolution of the Board's ADC: 12bit--> 2^12 = 4096
+
+int32_t time_connected = 0;
+String CS = "";
+String HR = "";
+std::string temp_read_string = "0";
+int setup_flag = 0;
+
+// ---------------- ---------------- ---------------- ---------------- ----------------
+// -------------------------------------- NimBLE  -------------------------------------
+// ---------------- ---------------- ---------------- ---------------- ----------------
+void scanEndedCB(NimBLEScanResults results);
+
+static NimBLEUUID serviceUUID_HR("0000180d-0000-1000-8000-00805f9b34fb");       // Heart Rate Service (0x180D)
+static NimBLEUUID    charUUID_HR("00002a37-0000-1000-8000-00805f9b34fb");       // Heart Rate Characteristic (0x2A37)
+
+static NimBLEAdvertisedDevice* advDevice;
+static bool doConnect = false;
+
+static uint32_t scanTime = 0; /** 0 = scan forever */
+
+uint32_t CBcounter= 0;
+uint16_t HeartRate = 0;
+uint16_t HeartRate_old = 0;
+
+std::string did = "W";
+std::string eid = "T1";
+std::string fid = "01";
+std::string loraS = "";
+std::string HRs = "";
+uint32_t CBcounter_old = 0;
+int loop_counter = 0;
+int Disc_counter = 0;
+
+void log_data(void) {
+    Serial.print("Log --> @ Time: ");
+    Serial.print(millis());
+    Serial.print("   # of Disconnects: "); 
+    Serial.print(Disc_counter);
+    Serial.println("");
+};
+
+// Read ADC value and convert to temperature
+std::string analog2Temp() {
+ uint8_t i;
+ float average;
+ std::string fStr;
+ average = analogRead(THERMISTORPIN);        // Read ADC Pin Voltage
+ average = ADCRESOLUTION / average - 1;               // Convert voltage to bits using ADC resolution
+ average = SERIESRESISTOR / average;
+ 
+ float steinhart;                             // degC
+ float farenheit;                             // degF
+ steinhart = average / THERMISTORNOMINAL;     // (R/Ro)
+ steinhart = log(steinhart);                  // ln(R/Ro)
+ steinhart /= BCOEFFICIENT;                   // 1/B * ln(R/Ro)
+ steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15); // + (1/To)
+ steinhart = 1.0 / steinhart;                 // Invert
+ steinhart -= 273.15;                         // convert absolute temp to C
+ farenheit = steinhart*1.8 + 32;              // convert C to F
+
+ fStr = std::to_string(farenheit);
+ fStr = fStr.substr(0, fStr.length()-4);
+ return fStr;
+}
+
+//*  None of these are required as they will be handled by the library with defaults. **
+class ClientCallbacks : public NimBLEClientCallbacks {
+    void onConnect(NimBLEClient* pClient) {
+        Serial.println("Connected");
+        /** After connection we should change the parameters if we don't need fast response times.
+         *  These settings are 150ms interval, 0 latency, 450ms timout.
+         *  Timeout should be a multiple of the interval, minimum is 100ms.
+         *  I find a multiple of 3-5 * the interval works best for quick response/reconnect.
+         *  Min interval: 120 * 1.25ms = 150, Max interval: 120 * 1.25ms = 150, 0 latency, 60 * 10ms = 600ms timeout
+         */
+        pClient->updateConnParams(120,120,0,60);
+    };
+
+    void onDisconnect(NimBLEClient* pClient) {
+        Serial.print(pClient->getPeerAddress().toString().c_str());
+        Serial.println(" Disconnected - Starting scan");
+        //CBcounter = 0;
+        Disc_counter++;
+        //time_connected = millis();
+        log_data();
+        NimBLEDevice::getScan()->start(scanTime, scanEndedCB);
+    };
+
+    /** Called when the peripheral requests a change to the connection parameters.
+     *  Return true to accept and apply them or false to reject and keep
+     *  the currently used parameters. Default will return true.
+     */
+    bool onConnParamsUpdateRequest(NimBLEClient* pClient, const ble_gap_upd_params* params) {
+        if(params->itvl_min < 24) { /** 1.25ms units */
+            return false;
+        } else if(params->itvl_max > 40) { /** 1.25ms units */
+            return false;
+        } else if(params->latency > 2) { /** Number of intervals allowed to skip */
+            return false;
+        } else if(params->supervision_timeout > 100) { /** 10ms units */
+            return false;
+        }
+
+        return true;
+    };
+
+    /********************* Security handled here **********************
+    ****** Note: these are the same return values as defaults ********/
+    uint32_t onPassKeyRequest(){
+        Serial.println("Client Passkey Request");
+        /** return the passkey to send to the server */
+        return 123456;
+    };
+
+    bool onConfirmPIN(uint32_t pass_key){
+        Serial.print("The passkey YES/NO number: ");
+        Serial.println(pass_key);
+    /** Return false if passkeys don't match. */
+        return true;
+    };
+
+    /** Pairing process complete, we can check the results in ble_gap_conn_desc */
+    void onAuthenticationComplete(ble_gap_conn_desc* desc){
+        if(!desc->sec_state.encrypted) {
+            Serial.println("Encrypt connection failed - disconnecting");
+            /** Find the client with the connection handle provided in desc */
+            NimBLEDevice::getClientByID(desc->conn_handle)->disconnect();
+            return;
+        }
+    };
+};
+
+/** Define a class to handle the callbacks when advertisments are received */
+class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
+
+    void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
+        Serial.print("Advertised Device found: ");
+        Serial.println(advertisedDevice->toString().c_str());
+        //if(advertisedDevice->isAdvertisingService(serviceUuid))
+        //if(advertisedDevice->getName().compare("InfiniTime") == 0)
+        if(advertisedDevice->getName().compare("Polar Grit X A51C652F") == 0)
+        {
+            Serial.println("Found Our Service on Polar Grit X A51C652F");
+            /** stop scan before connecting */
+            NimBLEDevice::getScan()->stop();
+            /** Save the device reference in a global for the client to use*/
+            advDevice = advertisedDevice;
+            /** Ready to connect now */
+            doConnect = true;
+        }
+    };
+};
+
+/** Notification / Indication receiving handler callback */
+void notifyCB(NimBLERemoteCharacteristic* pRemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify){
+    
+    loraS = "W,T1,01,";
+
+
+    CBcounter++;
+    setup_flag = 0;
+    std::string str = (isNotify == true) ? "Notification" : "Indication";
+    std::string macS  = std::string(pRemoteCharacteristic->getRemoteService()->getClient()->getPeerAddress());
+    std::string srvcS = std::string(pRemoteCharacteristic->getRemoteService()->getUUID());
+    std::string charS = std::string(pRemoteCharacteristic->getUUID());
+    std::string valuS = std::string((char*)pData, length);
+    
+    str += " from ";
+    str += macS;
+    str += ": Service = " + srvcS;
+    str += ", Characteristic = " + charS;
+    str += ", Value = " + valuS;
+    
+    //Serial.println(str.c_str());
+
+    if (length > 0) {
+        if (srvcS == "0x180d") {
+            HeartRate = pData[1];
+
+            HR = String(HeartRate);
+            HRs = HR.c_str();
+            loraS += HRs + ",";
+            loraS += temp_read_string + "," + "end";
+            infoBuffer[9] = (float)HeartRate;
+            // LoRa.beginPacket();
+            // LoRa.setTxPower(23,RF_PACONFIG_PASELECT_PABOOST);
+            // LoRa.write((uint8_t*) loraS.c_str(), strlen(loraS.c_str()));
+            // LoRa.endPacket();
+//               //--- Send the Message --------------------------------------------
+            //rf95.send((uint8_t*) loraS.c_str(), strlen(loraS.c_str()));
+            //rf95.waitPacketSent();
+  //-----------------------------------------------------------------
+
+
+            //delay(50);
+
+            Serial.print("Heart Rate: ");
+            Serial.print(pData[1], DEC);
+            Serial.println("bpm");
+
+        }
+    }
+}
+
+/** Callback to process the results of the last scan or restart it */
+void scanEndedCB(NimBLEScanResults results){
+    Serial.println("Scan Ended");
+}
+
+/** Create a single global instance of the callback class to be used by all clients */
+static ClientCallbacks clientCB;
+
+/** Handles the provisioning of clients and connects / interfaces with the server */
+bool connectToServer() {
+    NimBLEClient* pClient = nullptr;
+
+    /** Check if we have a client we should reuse first **/
+    if(NimBLEDevice::getClientListSize()) {
+        /** Special case when we already know this device, we send false as the
+         *  second argument in connect() to prevent refreshing the service database.
+         *  This saves considerable time and power.
+         */
+        pClient = NimBLEDevice::getClientByPeerAddress(advDevice->getAddress());
+        if(pClient){
+            if(!pClient->connect(advDevice, false)) {
+                Serial.println("Reconnect failed");
+                return false;
+            }
+            Serial.println("Reconnected client");
+        }
+        /** We don't already have a client that knows this device,
+         *  we will check for a client that is disconnected that we can use.
+         */
+        else {
+            pClient = NimBLEDevice::getDisconnectedClient();
+        }
+    }
+
+    /** No client to reuse? Create a new one. */
+    if(!pClient) {
+        if(NimBLEDevice::getClientListSize() >= NIMBLE_MAX_CONNECTIONS) {
+            Serial.println("Max clients reached - no more connections available");
+            return false;
+        }
+
+        pClient = NimBLEDevice::createClient();
+
+        Serial.println("New client created");
+
+        pClient->setClientCallbacks(&clientCB, false);
+        /** Set initial connection parameters: These settings are 15ms interval, 0 latency, 120ms timout.
+         *  These settings are safe for 3 clients to connect reliably, can go faster if you have less
+         *  connections. Timeout should be a multiple of the interval, minimum is 100ms.
+         *  Min interval: 12 * 1.25ms = 15, Max interval: 12 * 1.25ms = 15, 0 latency, 51 * 10ms = 510ms timeout
+         */
+        pClient->setConnectionParams(12,12,0,51);
+        /** Set how long we are willing to wait for the connection to complete (seconds), default is 30. */
+        pClient->setConnectTimeout(5);
+
+
+        if (!pClient->connect(advDevice)) {
+            /** Created a client but failed to connect, don't need to keep it as it has no data */
+            NimBLEDevice::deleteClient(pClient);
+            Serial.println("Failed to connect, deleted client");
+            return false;
+        }
+    }
+
+    if(!pClient->isConnected()) {
+        if (!pClient->connect(advDevice)) {
+            Serial.println("Failed to connect");
+            return false;
+        }
+    }
+
+    Serial.print("Connected to: ");
+    Serial.println(pClient->getPeerAddress().toString().c_str());
+    Serial.print("RSSI: ");
+    Serial.println(pClient->getRssi());
+
+    /** Now we can read/write/subscribe the charateristics of the services we are interested in */
+    NimBLERemoteService* pSvc = nullptr;
+    NimBLERemoteCharacteristic* pChr = nullptr;
+    NimBLERemoteDescriptor* pDsc = nullptr;
+
+/**
+_________________________________________________________________
+|_______|_______|_______|_______|_______|_______|_______|_______|
+|_______|_______|_______|_______|_______|_______|_______|_______|
+|   |   |                                               |       |
+|---|---|                 SERVICE I                     |       |
+|___|___|_______________________________________________|_______|
+|_______|_______|_______|_______|_______|_______|_______|_______|
+    | |   | |   | |   | |   | |   | |   | |   | |   | |   | |
+    | |   | |   | |   | |   | |   | |   | |   | |   | |   | |
+    | |   | |   | |   | |   | |   | |   | |   | |   | |   | |
+    V V   V V   V V   V V   V V   V V   V V   V V   V V   V V       */    
+
+    pSvc = pClient->getService(serviceUUID_HR);
+    if(pSvc) {     /** make sure it's not null */
+        pChr = pSvc->getCharacteristic(charUUID_HR);
+
+        if(pChr) {     /** make sure it's not null */
+            if(pChr->canRead()) {
+                Serial.print(pChr->getUUID().toString().c_str());
+                Serial.print(" Value: ");
+                Serial.println(pChr->readValue().c_str());
+            }
+
+            if(pChr->canWrite()) {
+                if(pChr->writeValue("Tasty")) {
+                    Serial.print("Wrote new value to: ");
+                    Serial.println(pChr->getUUID().toString().c_str());
+                }
+                else {
+                    /** Disconnect if write failed */
+                    pClient->disconnect();
+                    return false;
+                }
+
+                if(pChr->canRead()) {
+                    Serial.print("The value of: ");
+                    Serial.print(pChr->getUUID().toString().c_str());
+                    Serial.print(" is now: ");
+                    Serial.println(pChr->readValue().c_str());
+                }
+            }
+
+            /** registerForNotify() has been deprecated and replaced with subscribe() / unsubscribe().
+             *  Subscribe parameter defaults are: notifications=true, notifyCallback=nullptr, response=false.
+             *  Unsubscribe parameter defaults are: response=false.
+             */
+            if(pChr->canNotify()) {
+                //if(!pChr->registerForNotify(notifyCB)) {
+                if(!pChr->subscribe(true, notifyCB)) {
+                    /** Disconnect if subscribe failed */
+                    pClient->disconnect();
+                    return false;
+                }
+            }
+            else if(pChr->canIndicate()) {
+                /** Send false as first argument to subscribe to indications instead of notifications */
+                //if(!pChr->registerForNotify(notifyCB, false)) {
+                if(!pChr->subscribe(false, notifyCB)) {
+                    /** Disconnect if subscribe failed */
+                    pClient->disconnect();
+                    return false;
+                }
+            }
+        }
+
+    } else {
+        Serial.println("HR 0x180d service not found.");
+    }
+
+/**
+_________________________________________________________________
+|_______|_______|_______|_______|_______|_______|_______|_______|
+|_______|_______|_______|_______|_______|_______|_______|_______|
+|   |   |                                               |       |
+|---|---|                 SERVICE II                    |       |
+|___|___|_______________________________________________|_______|
+|_______|_______|_______|_______|_______|_______|_______|_______|
+    | |   | |   | |   | |   | |   | |   | |   | |   | |   | |
+    | |   | |   | |   | |   | |   | |   | |   | |   | |   | |
+    | |   | |   | |   | |   | |   | |   | |   | |   | |   | |
+    V V   V V   V V   V V   V V   V V   V V   V V   V V   V V       */        
+    /** 
+    pSvc = pClient->getService(serviceUUID_BL);
+    if(pSvc) {     // make sure it's not null
+        pChr = pSvc->getCharacteristic(charUUID_BL);
+        if(pChr) {     // make sure it's not null
+            if(pChr->canRead()) {
+                Serial.print(pChr->getUUID().toString().c_str());
+                Serial.print(" Value: ");
+                Serial.println(pChr->readValue().c_str());
+            }
+            pDsc = pChr->getDescriptor(NimBLEUUID("C01D"));
+            if(pDsc) {   // make sure it's not null
+                Serial.print("Descriptor: ");
+                Serial.print(pDsc->getUUID().toString().c_str());
+                Serial.print(" Value: ");
+                Serial.println(pDsc->readValue().c_str());
+            }
+            if(pChr->canWrite()) {
+                if(pChr->writeValue("No tip!")) {
+                    Serial.print("Wrote new value to: ");
+                    Serial.println(pChr->getUUID().toString().c_str());
+                }
+                else {
+                    // Disconnect if write failed
+                    pClient->disconnect();
+                    return false;
+                }
+                if(pChr->canRead()) {
+                    Serial.print("The value of: ");
+                    Serial.print(pChr->getUUID().toString().c_str());
+                    Serial.print(" is now: ");
+                    Serial.println(pChr->readValue().c_str());
+                }
+            }
+            // * registerForNotify() has been deprecated and replaced with subscribe() / unsubscribe().
+            // *  Subscribe parameter defaults are: notifications=true, notifyCallback=nullptr, response=false.
+            // *  Unsubscribe parameter defaults are: response=false.
+             
+            if(pChr->canNotify()) {
+                //if(!pChr->registerForNotify(notifyCB)) {
+                if(!pChr->subscribe(true, notifyCB)) {
+                    // Disconnect if subscribe failed
+                    pClient->disconnect();
+                    return false;
+                }
+            }
+            else if(pChr->canIndicate()) {
+                // Send false as first argument to subscribe to indications instead of notifications
+                //if(!pChr->registerForNotify(notifyCB, false)) {
+                if(!pChr->subscribe(false, notifyCB)) {
+                    // Disconnect if subscribe failed
+                    pClient->disconnect();
+                    return false;
+                }
+            }
+        }
+    } else {
+        Serial.println("Battery Level (0x180F) service not found.");
+    }
+*/
+    Serial.println("Done with this device!");
+    return true;
+}
+//============================End of Nimble
+
+
+
+// Error handle loop
+void error_loop() {
+  while(1) {
+    delay(100);
+  }
+}
+
+//This is the function where the message data is set and the msg are actually published. RCLCPP_INFO macro ensures every published msg is printed to the console
+void timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
+  RCLC_UNUSED(last_call_time);
+  if (timer != NULL) {
+    // RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
+    RCSOFTCHECK(rcl_publish(&publisher, &msg2, NULL));
+    // infoBuffer[0]+=1;
+    // infoBuffer[1]+=2;
+    // infoBuffer[2]+=3;
+    // RCSOFTCHECK(rcl_publish(&publisher2, &msg_array_float, NULL));
+    // msg_array_float.data.data[0]++;
+    // msg.data++;
+    // custom_msg.bool_test = 1;
+  }
+}
+
+
+void SetupSD(){
+    //Initialize SD Card
+  Serial.print("Initializing SD card...");
+  // see if the card is present and can be initialized:
+  Serial.println("SD.begin....");
+  if (!SD.begin(H_CS, H_MOSI , H_MISO, H_CLK)) {
+    Serial.println("Card failed, or not present");
+    // don't do anything more:
+    while (1);
+  }
+  Serial.println("card initialized.");
+
+  delay(100);
+  // open the file. note that only one file can be open at a time,
+  // so you have to close this one before opening another.
+  myFile = SD.open("/test.txt", FILE_WRITE);
+  delay(100);
+
+  // if the file opened okay, write to it:
+  if (myFile) {
+    Serial.print("Writing to test.txt...");
+    myFile.println("testing 1, 2, 3.");
+    // close the file:
+    myFile.close();
+    Serial.println("done.");
+  } else {
+    // if the file didn't open, print an error:
+    Serial.println("error opening test.txt");
+  }
+  delay(100);
+}
+
+
+void update_latitude_and_longitude(void *pvParameter) {
+  // setup
+  if (!myGNSS.begin()) {
+    Serial.println(F("u-blox GNSS not detected at default I2C address. Please check wiring. Freezing."));
+    myGNSS.setI2COutput(COM_TYPE_UBX); //Set the I2C port to output UBX only (turn off NMEA noise)
+    myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT); //Save (only) the communications port settings to flash and BBR
+    while(1);
+  }
+  delay(500);
+  // loop
+  for (;;) {
+    xSemaphoreTake(GPSMutex, portMAX_DELAY);
+//    GPSlist = String(GPScounter);
+    GPScounter++;
+//    xSemaphoreGive(GPSMutex);
+    latitude  = myGNSS.getLatitude()/10000000.;
+    longitude = myGNSS.getLongitude()/10000000.;
+    altitude  = myGNSS.getAltitude()/1000.;
+    // latitude  = myGNSS.getLatitude();
+    // longitude = myGNSS.getLongitude();
+    // altitude  = myGNSS.getAltitude();
+    // GPSspeed = myGNSS.getGroundSpeed();
+    // GPSheading = myGNSS.getHeading();
+    // Serial.println(String(myGNSS.getLatitude())+ "," + String(myGNSS.getLongitude()));
+
+//    GPSlist = String(myGNSS.getLatitude()) + "," + String(myGNSS.getLongitude());
+    // GPSlist = String(GPScounter) + "," + String(myGNSS.getLatitude()) + "," + String(myGNSS.getLongitude());
+
+    // Serial.println(GPSlist);
+    infoBuffer[0] = latitude;
+    infoBuffer[1] = longitude;
+    infoBuffer[2] = altitude;
+
+    rtc_wdt_feed(); //feed watchdog
+    xSemaphoreGive(GPSMutex);
+    vTaskDelay(RATE_GPS / portTICK_PERIOD_MS);
+  }
+}
+
+
+//IMU stuff --------------------
+void printEvent(sensors_event_t* event) {
+  double x = -1000000, y = -1000000 , z = -1000000; //dumb values, easy to spot problem
+  if (event->type == SENSOR_TYPE_ACCELEROMETER) {
+//    Serial.print("Accl:");
+    x = event->acceleration.x;
+    y = event->acceleration.y;
+    z = event->acceleration.z;
+    Ax = x;
+    Ay = y;
+    Az = z;
+    // infoBuffer[3] = Ax;
+    // infoBuffer[4] = Ay;
+    // infoBuffer[5] = Az;
+  }
+ else if (event->type == SENSOR_TYPE_ORIENTATION) {
+//    Serial.print("Orient:");
+   x = event->orientation.x;
+   y = event->orientation.y;
+   z = event->orientation.z;
+   Euler_x = x;
+   Euler_y = y;
+   Euler_z = z;
+
+ }
+//  else if (event->type == SENSOR_TYPE_MAGNETIC_FIELD) {
+////    Serial.print("Mag:");
+//    x = event->magnetic.x;
+//    y = event->magnetic.y;
+//    z = event->magnetic.z;
+//  }
+//  else if (event->type == SENSOR_TYPE_GYROSCOPE) {
+////    Serial.print("Gyro:");
+//    x = event->gyro.x;
+//    y = event->gyro.y;
+//    z = event->gyro.z;
+//  }
+//  else if (event->type == SENSOR_TYPE_ROTATION_VECTOR) {
+////    Serial.print("Rot:");
+//    x = event->gyro.x;
+//    y = event->gyro.y;
+//    z = event->gyro.z;
+//  }
+//  else if (event->type == SENSOR_TYPE_LINEAR_ACCELERATION) {
+////    Serial.print("Linear:");
+//    x = event->acceleration.x;
+//    y = event->acceleration.y;
+//    z = event->acceleration.z;
+//  }
+//  else if (event->type == SENSOR_TYPE_GRAVITY) {
+////    Serial.print("Gravity:");
+//    x = event->acceleration.x;
+//    y = event->acceleration.y;
+//    z = event->acceleration.z;
+//  }
+//  else {
+////    Serial.print("Unk:");
+//  }
+//
+//  Serial.print("\tx= ");
+//  Serial.print(x);
+//  Serial.print(" |\ty= ");
+//  Serial.print(y);
+//  Serial.print(" |\tz= ");
+//  Serial.println(z);
+}
+
+void update_IMU_data(void *pvParameter) {
+  // setup
+  if (!bno.begin()) {
+    Serial.print("Could not connect to the IMU sensor for 3D movement.");
+    while(1);
+  }
+
+  delay(100);
+
+  // loop
+  for (;;) {
+    xSemaphoreTake(IMUMutex, portMAX_DELAY);
+//    IMUlist = String(IMUcounter);
+    IMUcounter++;
+//    xSemaphoreGive(GPSMutex);
+    
+    bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER); //Three axis orientation data based on a 360° sphere
+    bno.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE); //Three axis of 'rotation speed' in rad/s
+    bno.getEvent(&linearAccelData, Adafruit_BNO055::VECTOR_LINEARACCEL); //Three axis of linear acceleration data (acceleration minus gravity) in m/s^2
+    bno.getEvent(&magnetometerData, Adafruit_BNO055::VECTOR_MAGNETOMETER); //Three axis of magnetic field sensing in micro Tesla (uT)
+    bno.getEvent(&accelerometerData, Adafruit_BNO055::VECTOR_ACCELEROMETER); //Three axis of acceleration (gravity + linear motion) in m/s^2
+    // bno.getEvent(&gravityData, Adafruit_BNO055::VECTOR_GRAVITY); //Three axis of gravitational acceleration (minus any movement) in m/s^2
+
+    printEvent(&linearAccelData);
+    printEvent(&orientationData);
+    Ax = linearAccelData.acceleration.x;
+    Ay = linearAccelData.acceleration.y;
+    Az = linearAccelData.acceleration.z;
+    Bx = magnetometerData.magnetic.x;
+    By = magnetometerData.magnetic.y;
+    Bz = magnetometerData.magnetic.z;
+    Gyrox = angVelocityData.gyro.x;
+    Gyroy = angVelocityData.gyro.y;
+    Gyroz = angVelocityData.gyro.z;
+    heading = angVelocityData.gyro.heading;
+
+    infoBuffer[3] = Ax;
+    infoBuffer[4] = Ay;
+    infoBuffer[5] = Az;
+    infoBuffer[6] = Euler_x;
+    infoBuffer[7] = Euler_y;
+    infoBuffer[8] = Euler_z;
+
+
+
+    IMUlist = String(Ax) + "," + String(Ay) + "," + String(Az) + "||" + String(Gyrox) + "," + String(Gyroy) + "," + String(Gyroz) + "||" + String(heading);
+    // IMUlist = String(IMUcounter) + "," + String(Gyrox) + "," + String(Gyroy) + "," + String(Gyroz);
+    // Serial.println(IMUlist);
+    
+//    heap_caps_check_integrity_all(true);
+//    heap_caps_print_heap_info(MALLOC_CAP_DEFAULT);
+    
+    xSemaphoreGive(IMUMutex);
+
+    rtc_wdt_feed(); //feed watchdog
+    
+    vTaskDelay(RATE_IMU / portTICK_PERIOD_MS);
+  }
+}
+
+void NimBLE_Setup(){
+      //-----------NIMBLE setup
+    delay(1000);                    // allow some time for the RFM95W to setup
+
+    NimBLEDevice::init("");                 // initialize the NimBLEDevice
+    delay(1000);                            // allow time for the NimBLEDevice to initialize
+    Serial.println("NimBLE Initialized...");
+
+    // Heltec.display->init();
+    // Heltec.display->flipScreenVertically();  
+    // Heltec.display->setFont(ArialMT_Plain_10);
+
+    // delay(1500);
+
+    // Heltec.display->clear();
+
+    setup_flag = 1;
+    //  Heltec.display->drawString(0, 0, "Heltec.LoRa Initial success!");
+    //  Heltec.display->display();
+    //  delay(1000);
+
+    //Serial.begin(115200);
+    //Serial.println("Starting NimBLE Client");
+
+    //-----File Info --------------------
+    //  Serial.println("File Name:");
+    //  Serial.print(__FILE__);
+    //  Serial.println("Date Compiled: ");
+    //  Serial.print(__DATE__);
+    //  Serial.println("");
+    //-----File Info --------------------
+    
+    /** Initialize NimBLE, no device name spcified as we are not advertising */
+    //NimBLEDevice::init("");
+    /** Set the IO capabilities of the device, each option will trigger a different pairing method.
+     *  BLE_HS_IO_KEYBOARD_ONLY   - Passkey pairing
+     *  BLE_HS_IO_DISPLAY_YESNO   - Numeric comparison pairing
+     *  BLE_HS_IO_NO_INPUT_OUTPUT - DEFAULT setting - just works pairing
+     */
+
+    //NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY); // use passkey
+    //NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_YESNO); //use numeric comparison
+    
+    /** 2 different ways to set security - both calls achieve the same result.
+     *  no bonding, no man in the middle protection, secure connections.
+     *
+     *  These are the default values, only shown here for demonstration.
+     */
+    //NimBLEDevice::setSecurityAuth(false, false, true);
+    NimBLEDevice::setSecurityAuth(/*BLE_SM_PAIR_AUTHREQ_BOND | BLE_SM_PAIR_AUTHREQ_MITM |*/ BLE_SM_PAIR_AUTHREQ_SC);
+
+    /** Optional: set the transmit power, default is 3db */
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9); /** +9db */
+
+    /** Optional: set any devices you don't want to get advertisments from */
+    // NimBLEDevice::addIgnored(NimBLEAddress ("aa:bb:cc:dd:ee:ff"));
+
+    /** create new scan */
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+
+    /** create a callback that gets called when advertisers are found */
+    pScan->setAdvertisedDeviceCallbacks(new AdvertisedDeviceCallbacks());
+
+    /** Set scan interval (how often) and window (how long) in milliseconds */
+    pScan->setInterval(45);
+    pScan->setWindow(15);
+
+    /** Active scan will gather scan response data from advertisers
+     *  but will use more energy from both devices
+     */
+    pScan->setActiveScan(true);
+    /** Start scanning for advertisers for the scan time specified (in seconds) 0 = forever
+     *  Optional callback for when scanning stops.
+     */
+    pScan->start(scanTime, scanEndedCB);
+}
+
+void setup() {
+  // ----------- Configure serial transport
+  Serial.begin(115200);
+  // set_microros_serial_transports(Serial);
+
+  //****** For Main WiFi....
+  IPAddress agent_ip(192, 168, 8, 70);
+  size_t agent_port = 8888;
+  char ssid[] = "8~mUhz:g&N.6$YQm";
+  char psk[]= "s<'XEtWG'u#HN2s";
+
+  //***** For Router WiFi....
+  // IPAddress agent_ip(10, 160, 193, 235 );
+  // size_t agent_port = 8888;
+  // char ssid[] = "AIT-LAN-2.4GHz";
+  // char psk[]= "password";
+
+  set_microros_wifi_transports(ssid, psk, agent_ip, agent_port);
+
+  //multiarray initialization
+  msg2.data.capacity = 10;
+  msg2.data.data =  (float*)infoBuffer;
+  msg2.data.size = 10;
+
+  SPI2.begin(H_CLK, H_MISO, H_MOSI, H_CS);
+  // cli();
+  delay(500);
+  SetupSD();
+  delay(100);
+  
+  Wire.begin(4, 15);
+  // Wire.begin();
+  delay(100);
+  Wire.setClock(400000); //fast mode
+  delay(100);
+
+  delay(2000);
+  Serial.println("Initialized...");
+
+  //create Mutex/Semaphores
+//   GPSMutex = xSemaphoreCreateMutex();
+//   IMUMutex = xSemaphoreCreateMutex();
+//   LORAMutex = xSemaphoreCreateMutex();
+//   xTaskCreatePinnedToCore(update_latitude_and_longitude, "update_latitude_and_longitude", 8912, NULL, 1, &Task1, 1);
+//   delay(100); //important delay
+//   xTaskCreatePinnedToCore(update_IMU_data, "update_IMU_data", 8912, NULL, 1, &Task2, 1);
+//   delay(100); //important delay
+
+  //=========================ROS2 stuff setup..............===================
+  Serial.println("ROS2 Allocator...");
+  allocator = rcl_get_default_allocator();
+  Serial.println("ROS2 Allocated...");
+  //create init_options
+  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+Serial.println("ROS2 Node Creating...");
+  // create node
+  RCCHECK(rclc_node_init_default(&node, "micro_ros_platformio_node", "", &support));
+Serial.println("ROS2 Node Created...");
+  // create publisher
+  // RCCHECK(rclc_publisher_init_best_effort(
+  //   &publisher,
+  //   &node,
+  //   ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+  //   "micro_ros_platformio_node_publisher"));
+
+  // // create publisher2
+  RCCHECK(rclc_publisher_init_best_effort(
+    &publisher,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+    "micro_ros_my_custom_publisher"));
+
+  // create timer,
+  const unsigned int timer_timeout = 1000; //this is the speed on which it is published, set to 1 for extra speed
+  RCCHECK(rclc_timer_init_default(
+    &timer,
+    &support,
+    RCL_MS_TO_NS(timer_timeout),
+    timer_callback));
+
+  // create executor
+  RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+  RCCHECK(rclc_executor_add_timer(&executor, &timer));
+
+  msg.data = 0;
+
+  Serial.println("Before....");
+  msg2.data.data[0] = 0.1;
+  // msg2.data.data[1] = 0.1;
+  Serial.println("After....");
+
+}
+
+int while_loop_counter = 0;
+int lora_send_counter = 0;
+
+void trialPolar(){
+        /** Loop here until we find a device we want to connect to */
+    while(!doConnect){
+        delay(1);
+        while_loop_counter++;
+        lora_send_counter++;
+        if (while_loop_counter >= 617) {
+            temp_read_string = analog2Temp();
+            while_loop_counter = 0;
+  //-----------------------------------------------------------------
+        }
+        if (lora_send_counter>=100) {
+            // loraS+= temp_read_string + ",";
+                                      //--- Send the Message --------------------------------------------
+            // rf95.send((uint8_t*) loraS.c_str(), strlen(loraS.c_str()));
+            // rf95.waitPacketSent();
+
+            //loraS = "W,T1,01,";
+            lora_send_counter = 0;
+            
+        }
+        //temp_read_string = analog2Temp();
+        if ((time_connected !=0)) {
+            if (((millis() - time_connected) >= 3000) && CBcounter == 0) {
+              Serial.println("Rebooting in 3");
+              delay(250);
+              Serial.println("Rebooting in 2");
+              delay(250);
+              Serial.println("Rebooting in 1");
+              delay(250);
+              ESP.restart();
+            }
+        }
+    }
+    
+    loop_counter++;     //Count the loops where doConnect == True aka count the loops where we have found a device we want to connect to. 
+    Serial.print("# of main Loops Counted outside the Connection While loop: ");
+    Serial.println(loop_counter);
+    doConnect = false;
+
+    /** Found a device we want to connect to, do it now */
+    if(connectToServer()) {
+        Serial.println("Success! we should now be getting notifications, scanning for more!");
+        time_connected = millis();
+        // Serial.println("Rebooting");
+        // ESP.restart();
+
+    } else {
+        Serial.println("Failed to connect, starting scan");
+        NimBLEDevice::getScan()->start(scanTime,scanEndedCB);
+
+    }
+}
+
+
+void loop() {
+    // trialPolar();
+
+//    if (HeartRate_old!=HeartRate) {
+//        Serial.print("SEND NEW HEART RATE over LORA: ");
+//        Serial.print(HeartRate);
+//        Serial.println(" bpm");
+//        HeartRate_old = HeartRate;
+//      }
+//      else {
+//        Serial.println("No change in Heart Rate");
+//      }
+
+//     Serial.println(HeartRate);
+    
+//     NimBLEDevice::getScan()->start(scanTime,scanEndedCB);
+
+  RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)));
+}
