@@ -26,6 +26,7 @@ Updated: 8/11/2022   NH
 #include <std_msgs/msg/float64.h>
 #include <std_msgs/msg/header.h>
 #include <std_msgs/msg/int32.h>                     // ROS2 int32 msgs
+#include <std_msgs/msg/int64.h> 
 #include <std_msgs/msg/string.h>                    // ROS2 string msgs
 #include <std_msgs/msg/int32_multi_array.h>         // ROS2 int32 arrays
 #include <string>                                   // C++ standard string Library
@@ -49,10 +50,15 @@ Updated: 8/11/2022   NH
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}  
 
+
+rcl_publisher_t publisher;
+std_msgs__msg__Int64 msg;
+
 //publisher initialization
 rcl_publisher_t imu_pub;
 rcl_publisher_t gps_pub;
 rcl_publisher_t temp_pub;
+
 
 // new proper messages
 sensor_msgs__msg__NavSatFix gps_msg;
@@ -81,8 +87,11 @@ int LORAcounter = 0;
 
 //ros time synchronization
 const int timeout_ms = 1000;
-static int64_t time_ns;
-static time_t time_seconds;
+//int64_t time_ns; to do: convert to uint32
+//time_t time_seconds; to do: convert to int32 
+
+uint32_t time_ns;
+int32_t time_seconds;
 
 // Mutex and Semaphores
 static SemaphoreHandle_t GPSMutex;
@@ -96,7 +105,7 @@ String message = "emptyMessage";
 
 // Task Rates
 static const int RATE_GPS = 5000;               //500; //2000;  // ms
-static const int RATE_IMU = 1000;                //100; //1000;  // ms
+static const int RATE_IMU = 1;                //100; //1000;  // ms
 static const int RATE_LORA = 3000;              //500; //1000;  // ms
 
 //      || -------------------- GPS -------------------- ||  
@@ -146,13 +155,28 @@ void error_loop() {
 // This is the function where the message data is set and the msgs are actually published.  
 // RCLCPP_INFO macro ensures every published msg is printed to the console
 void timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
+	(void) last_call_time;
+	(void) timer;
   RCLC_UNUSED(last_call_time);
+
+  //time stamping
+  RCSOFTCHECK(rmw_uros_sync_session(1000));
+  time_seconds = rmw_uros_epoch_millis()/1000;
+  time_ns = rmw_uros_epoch_nanos();
+
+  // msg.data = time;
   if (timer != NULL) {
+
     // RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
-    //RCSOFTCHECK(rcl_publish(&gps_pub, &gps_msg, NULL));
+    RCSOFTCHECK(rcl_publish(&gps_pub, &gps_msg, NULL));
     RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL));
+    // RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL)); //time stamp publisher
     // RCSOFTCHECK(rcl_publish(&temp_pub, &temp_msg, NULL));
   }
+
+	RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
+	printf("UNIX time: %ld ms\n", time);
+
 }
 
 // freeRTOS task for GPS
@@ -277,7 +301,7 @@ void update_IMU_data(void *pvParameter) {
     while(1);
   }
 
-  delay(500);
+  delay(100);
 
   // loop
   for (;;) {
@@ -296,9 +320,8 @@ void update_IMU_data(void *pvParameter) {
     bno.getEvent(&magnetometerData, Adafruit_BNO055::VECTOR_MAGNETOMETER); //Three axis of magnetic field sensing in micro Tesla (uT)
     bno.getEvent(&accelerometerData, Adafruit_BNO055::VECTOR_ACCELEROMETER); //Three axis of acceleration (gravity + linear motion) in m/s^2
     bno.getEvent(&gravityData, Adafruit_BNO055::VECTOR_GRAVITY); //Three axis of gravitational acceleration (minus any movement) in m/s^2
-    //printEvent(&linearAccelData);
-    //printEvent(&orientationData);
-    
+    printEvent(&linearAccelData);
+    printEvent(&orientationData);
     imu_msg.linear_acceleration.x = linearAccelData.acceleration.x;
     imu_msg.linear_acceleration.y = linearAccelData.acceleration.y;
     imu_msg.linear_acceleration.z = linearAccelData.acceleration.z;
@@ -316,8 +339,9 @@ void update_IMU_data(void *pvParameter) {
 
 
     // imu_msg.header.stamp.nanosec = time_seconds;
-    // imu_msg.header.stamp.nanosec = rmw_uros_epoch_nanos();
-    // imu_msg.header.frame_id.data = "camera_imu_optical_frame";
+    imu_msg.header.stamp.sec = time_seconds;
+    imu_msg.header.stamp.nanosec = time_ns;
+    imu_msg.header.frame_id.data = "camera_imu_optical_frame";
 
     imu_msg.angular_velocity_covariance[0] = .5;
     imu_msg.angular_velocity_covariance[4] = .5;
@@ -344,7 +368,7 @@ void update_IMU_data(void *pvParameter) {
 
     rtc_wdt_feed(); //feed watchdog
     
-    vTaskDelay(1 / portTICK_PERIOD_MS);
+    vTaskDelay(RATE_IMU / portTICK_PERIOD_MS);
   }
 }
 
@@ -404,6 +428,13 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
     "imu"));
 
+	// create timestamp publisher
+	RCCHECK(rclc_publisher_init_default(
+		&publisher,
+		&node,
+		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int64),
+		"microROS_timestamp"));
+
   // // create temp publisher
   //RCCHECK(rclc_publisher_init_best_effort(
     //&temp_pub,
@@ -447,6 +478,7 @@ Platform IO CLI bash commands
 lsusb
 ls /dev/ttyUSB*
 
+#### serial.serialutil.SerialException: [Errno 13] could not open port /dev/ttyUSB0: [Errno 13] Permission denied: '/dev/ttyUSB0'
 |----- permissions ------|          if you don't have permission to use upload port /dev/ttyUSB*
 
 sudo chown <insert_username_here> /dev/ttyUSB0
