@@ -5,8 +5,11 @@ Updated: 8/11/2022   NH
          9/12/2022   TK
 */
 
-
-
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
+#include <secrets.h>
 
 #include <Arduino.h>                                // Arduino Framework Headers
 #include <micro_ros_platformio.h>                   // MicroROS for Platform IO
@@ -42,14 +45,13 @@ Updated: 8/11/2022   NH
 // I2C Definitions
 #define PIN_SDA 4                                  // HT = 4  , TP = 23  , Dev 21
 #define PIN_SCL 15                                  // HT = 15 , TP = 22  , Dev 22
-#define I2C_CLK_SPEED 800000                        // I2C Clock Speed (fast --> 400000)  
+#define I2C_CLK_SPEED 400000                        // I2C Clock Speed (fast --> 400000)  
 
 //      || -------------------- microROS -------------------- ||
 
 // ????
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}  
-
 
 rcl_publisher_t publisher;
 std_msgs__msg__Int64 msg;
@@ -58,7 +60,6 @@ std_msgs__msg__Int64 msg;
 rcl_publisher_t imu_pub;
 rcl_publisher_t gps_pub;
 rcl_publisher_t temp_pub;
-
 
 // new proper messages
 sensor_msgs__msg__NavSatFix gps_msg;
@@ -166,7 +167,6 @@ void timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
 
   // msg.data = time;
   if (timer != NULL) {
-
     // RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
     RCSOFTCHECK(rcl_publish(&gps_pub, &gps_msg, NULL));
     RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL));
@@ -184,8 +184,8 @@ void update_latitude_and_longitude(void *pvParameter) {
   // setup
   if (!myGNSS.begin()) {
     Serial.println(F("u-blox GNSS not detected at default I2C address. Please check wiring. Freezing."));
-    myGNSS.setI2COutput(COM_TYPE_UBX); //Set the I2C port to output UBX only (turn off NMEA noise)
-    myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT); //Save (only) the communications port settings to flash and BBR
+    myGNSS.setI2COutput(COM_TYPE_UBX);                      //Set the I2C port to output UBX only (turn off NMEA noise)
+    myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT);      //Save (only) the communications port settings to flash and BBR
     while(1);
   }
   delay(500);
@@ -193,27 +193,21 @@ void update_latitude_and_longitude(void *pvParameter) {
   for (;;) {
     xSemaphoreTake(GPSMutex, portMAX_DELAY);
     GPScounter++;
-    // gps_msg.latitude  = myGNSS.getLatitude()/10000000.;
-    // gps_msg.longitude = myGNSS.getLongitude()/10000000.;
-    // gps_msg.altitude  = myGNSS.getAltitude()/1000.;
-    // gps_msg.status.status = int(myGNSS.getNAVSTATUS()) - 1;
-    // gps_msg.position_covariance_type = 2;
-    //position_covariance[0] = myGNSS.getHorizontalAccuracy();
-    //position_covariance[4] = myGNSS.getHorizontalAccuracy();
-    //position_covariance[8] = myGNSS.getVerticalAccuracy();
-    // gps_msg.position_covariance[0] = myGNSS.getHorizontalAccuracy();
-    // gps_msg.position_covariance[4] = myGNSS.getHorizontalAccuracy();
-    // gps_msg.position_covariance[8] = myGNSS.getVerticalAccuracy();
+    
+    gps_msg.latitude  = myGNSS.getLatitude()/10000000.;
+    gps_msg.longitude = myGNSS.getLongitude()/10000000.;
+    gps_msg.altitude  = myGNSS.getAltitude()/1000.;
+    gps_msg.status.status = int(myGNSS.getNAVSTATUS()) - 1;
+    gps_msg.position_covariance_type = 2;
+    gps_msg.position_covariance[0] = myGNSS.getHorizontalAccuracy();
+    gps_msg.position_covariance[4] = myGNSS.getHorizontalAccuracy();
+    gps_msg.position_covariance[8] = myGNSS.getVerticalAccuracy();
 
-    // latitude  = myGNSS.getLatitude();
-    // longitude = myGNSS.getLongitude();
-    // altitude  = myGNSS.getAltitude();
-    // GPSspeed = myGNSS.getGroundSpeed();
-    // GPSheading = myGNSS.getHeading();
-    // Serial.println(String(myGNSS.getLatitude())+ "," + String(myGNSS.getLongitude()));
-
-//    GPSlist = String(myGNSS.getLatitude()) + "," + String(myGNSS.getLongitude());
-    // GPSlist = String(GPScounter) + "," + String(myGNSS.getLatitude()) + "," + String(myGNSS.getLongitude());
+    latitude  = myGNSS.getLatitude();
+    longitude = myGNSS.getLongitude();
+    altitude  = myGNSS.getAltitude();
+    GPSspeed = myGNSS.getGroundSpeed();
+    GPSheading = myGNSS.getHeading();
 
     // Serial.println(GPSlist);
     //infoBuffer[0] = latitude;
@@ -225,6 +219,7 @@ void update_latitude_and_longitude(void *pvParameter) {
     vTaskDelay(RATE_GPS / portTICK_PERIOD_MS);
   }
 }
+
 
 void printEvent(sensors_event_t* event) {
   double x = -1000000, y = -1000000 , z = -1000000; //dumb values, easy to spot problem
@@ -307,12 +302,6 @@ void update_IMU_data(void *pvParameter) {
   for (;;) {
     IMUcounter++;
     xSemaphoreTake(IMUMutex, portMAX_DELAY);
-
-  // RCCHECK(rmw_uros_sync_session(timeout_ms));
-  // time_ns = rmw_uros_epoch_nanos();    
-
-//    IMUlist = String(IMUcounter);
-//    xSemaphoreGive(GPSMutex);
     
     bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER); //Three axis orientation data based on a 360° sphere
     bno.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE); //Three axis of 'rotation speed' in rad/s
@@ -322,6 +311,7 @@ void update_IMU_data(void *pvParameter) {
     bno.getEvent(&gravityData, Adafruit_BNO055::VECTOR_GRAVITY); //Three axis of gravitational acceleration (minus any movement) in m/s^2
     printEvent(&linearAccelData);
     printEvent(&orientationData);
+
     imu_msg.linear_acceleration.x = linearAccelData.acceleration.x;
     imu_msg.linear_acceleration.y = linearAccelData.acceleration.y;
     imu_msg.linear_acceleration.z = linearAccelData.acceleration.z;
@@ -334,11 +324,6 @@ void update_IMU_data(void *pvParameter) {
     imu_msg.orientation.y = orientationData.orientation.y;
     imu_msg.orientation.z = orientationData.orientation.z;
 
-    // time_seconds = time_ns /1000000000 ;
-    // int64_t time_rmd_ns = time_ns % 1000000000 ;
-
-
-    // imu_msg.header.stamp.nanosec = time_seconds;
     imu_msg.header.stamp.sec = time_seconds;
     imu_msg.header.stamp.nanosec = time_ns;
     imu_msg.header.frame_id.data = "camera_imu_optical_frame";
@@ -352,10 +337,6 @@ void update_IMU_data(void *pvParameter) {
     imu_msg.linear_acceleration_covariance[0] = 2;
     imu_msg.linear_acceleration_covariance[4] = 2;
     imu_msg.linear_acceleration_covariance[8] = 2;
-
-
-
-
 
     // IMUlist = String(Ax) + "," + String(Ay) + "," + String(Az) + "||" + String(Gyrox) + "," + String(Gyroy) + "," + String(Gyroz) + "||" + String(heading);
     // IMUlist = String(IMUcounter) + "," + String(Gyrox) + "," + String(Gyroy) + "," + String(Gyroz);
@@ -372,17 +353,54 @@ void update_IMU_data(void *pvParameter) {
   }
 }
 
-
-
 void setup() {
   // ----------- Configure data buses
   Serial.begin(115200);                         // begin serial
+  // Arduino OTA updates ---------------------------------------------------
+  Serial.println("Booting");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.waitForConnectResult()!=WL_CONNECTED) {
+    Serial.println("Connection Failed! Rebooting...");
+    delay(5000);
+    ESP.restart();
+  }
+  ArduinoOTA
+    .onStart([]() {
+      String type;
+      if (ArduinoOTA.getCommand() == U_FLASH)
+        type = "sketch";
+      else // U_SPIFFS
+        type = "filesystem";
+
+      // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+      Serial.println("Start updating " + type);
+    })
+    .onEnd([]() {
+      Serial.println("\nEnd");
+    })
+    .onProgress([](unsigned int progress, unsigned int total) {
+      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    })
+    .onError([](ota_error_t error) {
+      Serial.printf("Error[%u]: ", error);
+      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+      else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+
+  ArduinoOTA.begin();
+  Serial.println("Ready");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+// -----------------------------------------------------------------------------------------------------------------------------
   delay(500);                                   // !!! need time for serial to begin
   set_microros_serial_transports(Serial);       // set microROS transport to:  serial, wifi
   Wire.begin(PIN_SDA, PIN_SCL);                 // begin I2C
-//  Wire.begin(23, 22);                 // begin I2C
   delay(100);
-  //Wire.setClock(I2C_CLK_SPEED);                 // set I2C clock speed
   Wire.setClock(I2C_CLK_SPEED);                 // set I2C clock speed
 
   //delay(100);
@@ -392,8 +410,8 @@ void setup() {
   IMUMutex = xSemaphoreCreateMutex();
 
   // freeRTOS tasks for GPS, IMU
-  //xTaskCreatePinnedToCore(update_latitude_and_longitude, "update_latitude_and_longitude", 8912, NULL, 1, &Task1, 1);
-  //delay(100);                                   //important delay
+  xTaskCreatePinnedToCore(update_latitude_and_longitude, "update_latitude_and_longitude", 8912, NULL, 1, &Task1, 1);
+  delay(100);                                   //important delay
   xTaskCreatePinnedToCore(update_IMU_data, "update_IMU_data", 8912, NULL, 1, &Task2, 1);
   delay(100);                                   //important delay
 
@@ -415,11 +433,11 @@ void setup() {
   //   "micro_ros_platformio_node_publisher"));
 
   // //  create gps publisher
-  // RCCHECK(rclc_publisher_init_best_effort(
-  //   &gps_pub,
-  //   &node,
-  //   ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, NavSatFix),
-  //   "gps_NavSatFix"));
+  RCCHECK(rclc_publisher_init_best_effort(
+    &gps_pub,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, NavSatFix),
+    "gps_NavSatFix"));
 
   //  create imu publisher
   RCCHECK(rclc_publisher_init_best_effort(
@@ -454,17 +472,12 @@ void setup() {
   RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
   RCCHECK(rclc_executor_add_timer(&executor, &timer));
 
-  //msg.data = 0;
-
-  //Serial.println("Before....");
-  //msg2.data.data[0] = 0.1;
-  // msg2.data.data[1] = 0.1;
-  //Serial.println("After....");
-
 }
 
 void loop() {
   RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
+  ArduinoOTA.handle();    // Allow for OTA updates for ESP32 --> Ensure Platform.ini file is set up properly
+
 }
 
 
