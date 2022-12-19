@@ -42,9 +42,10 @@ Updated: 8/11/2022   NH
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h>   // GPS Library
 #include <Adafruit_BNO055.h>                        // IMU Library
 
+
 // I2C Definitions
-#define PIN_SDA 4                                  // HT = 4  , TP = 23  , Dev 21
-#define PIN_SCL 15                                  // HT = 15 , TP = 22  , Dev 22
+#define PIN_SDA 21                                  // HT = 4  , TP = 23  , Dev 21
+#define PIN_SCL 22                                  // HT = 15 , TP = 22  , Dev 22
 #define I2C_CLK_SPEED 400000                        // I2C Clock Speed (fast --> 400000)  
 
 //      || -------------------- microROS -------------------- ||
@@ -88,11 +89,8 @@ int LORAcounter = 0;
 
 //ros time synchronization
 const int timeout_ms = 1000;
-//int64_t time_ns; to do: convert to uint32
-//time_t time_seconds; to do: convert to int32 
-
-uint32_t time_ns;
-int32_t time_seconds;
+uint32_t time_ns; //changed from int64_t time_ns
+int32_t time_seconds; //changed from time_t time seconds
 
 // Mutex and Semaphores
 static SemaphoreHandle_t GPSMutex;
@@ -106,7 +104,7 @@ String message = "emptyMessage";
 
 // Task Rates
 static const int RATE_GPS = 5000;               //500; //2000;  // ms
-static const int RATE_IMU = 1;                //100; //1000;  // ms
+static const int RATE_IMU = 1;                  //100; //1000;  // ms
 static const int RATE_LORA = 3000;              //500; //1000;  // ms
 
 //      || -------------------- GPS -------------------- ||  
@@ -199,6 +197,11 @@ void update_latitude_and_longitude(void *pvParameter) {
     gps_msg.altitude  = myGNSS.getAltitude()/1000.;
     gps_msg.status.status = int(myGNSS.getNAVSTATUS()) - 1;
     gps_msg.position_covariance_type = 2;
+    gps_msg.status.
+    gps_msg.header.stamp.sec = time_seconds; //added 12/7 KC
+    gps_msg.header.stamp.nanosec = time_ns;  //added 12/7 KC
+    gps_msg.header.frame_id.data = "microros_gps_frame";
+
     gps_msg.position_covariance[0] = myGNSS.getHorizontalAccuracy();
     gps_msg.position_covariance[4] = myGNSS.getHorizontalAccuracy();
     gps_msg.position_covariance[8] = myGNSS.getVerticalAccuracy();
@@ -208,7 +211,6 @@ void update_latitude_and_longitude(void *pvParameter) {
     altitude  = myGNSS.getAltitude();
     GPSspeed = myGNSS.getGroundSpeed();
     GPSheading = myGNSS.getHeading();
-
     // Serial.println(GPSlist);
     //infoBuffer[0] = latitude;
     //infoBuffer[1] = longitude;
@@ -288,7 +290,7 @@ void printEvent(sensors_event_t* event) {
 }
 
 
-// freeRTOS task for GPS
+// freeRTOS task for IMU
 void update_IMU_data(void *pvParameter) {
   // setup
   if (!bno.begin()) {
@@ -326,7 +328,7 @@ void update_IMU_data(void *pvParameter) {
 
     imu_msg.header.stamp.sec = time_seconds;
     imu_msg.header.stamp.nanosec = time_ns;
-    imu_msg.header.frame_id.data = "camera_imu_optical_frame";
+    imu_msg.header.frame_id.data = "microros_imu_frame";
 
     imu_msg.angular_velocity_covariance[0] = .5;
     imu_msg.angular_velocity_covariance[4] = .5;
@@ -356,6 +358,7 @@ void update_IMU_data(void *pvParameter) {
 void setup() {
   // ----------- Configure data buses
   Serial.begin(115200);                         // begin serial
+/*
   // Arduino OTA updates ---------------------------------------------------
   Serial.println("Booting");
   WiFi.mode(WIFI_STA);
@@ -397,6 +400,7 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 // -----------------------------------------------------------------------------------------------------------------------------
+*/  
   delay(500);                                   // !!! need time for serial to begin
   set_microros_serial_transports(Serial);       // set microROS transport to:  serial, wifi
   Wire.begin(PIN_SDA, PIN_SCL);                 // begin I2C
@@ -476,13 +480,13 @@ void setup() {
 
 void loop() {
   RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
-  ArduinoOTA.handle();    // Allow for OTA updates for ESP32 --> Ensure Platform.ini file is set up properly
+  //ArduinoOTA.handle();    // Allow for OTA updates for ESP32 --> Ensure Platform.ini file is set up properly
 
 }
 
 
 
-/**
+/*
 
 Platform IO CLI bash commands
 
@@ -512,7 +516,7 @@ pio run --target /dev/ttyUSB0
 
 pio run --target upload
 
-**/
+*/
 
 /*
                                                    ._____.

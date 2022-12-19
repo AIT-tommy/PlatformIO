@@ -1,6 +1,7 @@
 {
 	"folders": [
 		{
+			"name": "MicroROS_platformIO",
 			"path": ".."
 		}
 	],
