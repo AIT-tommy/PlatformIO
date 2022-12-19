@@ -31,8 +31,7 @@ SFE_UBLOX_GNSS myGNSS;
 
 long lastTime = 0; //Simple local timer. Limits amount if I2C traffic to u-blox module.
 
-void setup()
-{
+void setup() {
   Serial.begin(115200);
   while (!Serial); //Wait for user to open terminal
   Serial.println("SparkFun u-blox Example");
@@ -51,8 +50,7 @@ void setup()
   myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT); //Save (only) the communications port settings to flash and BBR
 }
 
-void loop()
-{
+void loop() {
   //Query module only every second. Doing it more often will just cause I2C traffic.
   //The module only responds when a new position is available
   if (millis() - lastTime > 1000)
